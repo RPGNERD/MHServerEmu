@@ -1,23 +1,27 @@
 ﻿using Gazillion;
 using Google.ProtocolBuffers;
 using MHServerEmu.Common.Config;
-using MHServerEmu.GameServer.Entities.Avatars;
+using MHServerEmu.GameServer.Common;
 using MHServerEmu.GameServer.Entities;
+using MHServerEmu.GameServer.Entities.Avatars;
 using MHServerEmu.GameServer.Frontend.Accounts;
+using MHServerEmu.GameServer.GameData;
 using MHServerEmu.GameServer.GameData.Gpak.FileFormats;
 using MHServerEmu.GameServer.GameData.Prototypes.Markers;
-using MHServerEmu.GameServer.GameData;
 using MHServerEmu.GameServer.Powers;
 using MHServerEmu.GameServer.Properties;
 using MHServerEmu.GameServer.Regions;
+using MHServerEmu.GameServer.Social;
 using MHServerEmu.Networking;
-using System.Numerics;
-using System.Drawing;
 
 namespace MHServerEmu.GameServer.Games
 {
     public partial class Game
     {
+        // Hardcoded messages we use for loading
+        private static readonly NetMessageEntityCreate PlayerMessage = NetMessageEntityCreate.ParseFrom(PacketHelper.LoadMessagesFromPacketFile("NetMessageEntityCreatePlayer.bin")[0].Payload);
+        private static readonly NetMessageEntityCreate[] AvatarMessages = PacketHelper.LoadMessagesFromPacketFile("NetMessageEntityCreateAvatars.bin").Select(message => NetMessageEntityCreate.ParseFrom(message.Payload)).ToArray();
+
         private GameMessage[] GetBeginLoadingMessages(PlayerData playerData, bool loadEntities = true)
         {
             List<GameMessage> messageList = new();
@@ -40,7 +44,7 @@ namespace MHServerEmu.GameServer.Games
             messageList.Add(new(NetMessageReadyForTimeSync.DefaultInstance));
 
             // Load local player data
-            if (loadEntities) messageList.AddRange(LoadLocalPlayerDataMessages(playerData));
+            if (loadEntities) messageList.AddRange(LoadPlayerEntityMessages(playerData));
             messageList.Add(new(NetMessageReadyAndLoadedOnGameServer.DefaultInstance));
 
             // Load region data
@@ -251,7 +255,7 @@ namespace MHServerEmu.GameServer.Games
                         if (Entry.MarkerSet[i] is EntityMarkerPrototype)
                         {
                             EntityMarkerPrototype npc = (EntityMarkerPrototype)Entry.MarkerSet[i];
-                            Logger.Trace($"[{i}].EntityGuid = {npc.EntityGuid}");
+                            //Logger.Trace($"[{i}].EntityGuid = {npc.EntityGuid}");     // this is slow and causes Game tick time to go over 50 ms on loading
                             switch (npc.EntityGuid)
                             {
                                 case 9760489745388478121: // EncounterTinyV12                                    
@@ -382,11 +386,12 @@ namespace MHServerEmu.GameServer.Games
             return messageList.ToArray();
         }
 
-        private GameMessage[] LoadLocalPlayerDataMessages(PlayerData playerData)
+        private GameMessage[] LoadPlayerEntityMessages(PlayerData playerData)
         {
             List<GameMessage> messageList = new();
 
-            var localPlayerMessage = NetMessageLocalPlayer.CreateBuilder()
+            // NetMessageLocalPlayer (set local player entity id and game options)
+            messageList.Add(new(NetMessageLocalPlayer.CreateBuilder()
                 .SetLocalPlayerEntityId(14646212)
                 .SetGameOptions(NetStructGameOptions.CreateBuilder()
                     .SetTeamUpSystemEnabled(ConfigManager.GameOptions.TeamUpSystemEnabled)
@@ -412,126 +417,139 @@ namespace MHServerEmu.GameServer.Games
                     .SetIsDifficultySliderEnabled(ConfigManager.GameOptions.IsDifficultySliderEnabled)
                     .SetOrbisTrophiesEnabled(ConfigManager.GameOptions.OrbisTrophiesEnabled)
                     .SetPlatformType(8))
-                .Build();
+                .Build()));
 
-            messageList.Add(new(localPlayerMessage));
+            // Create player and avatar entities
+            // For now we're using dumped data as base and changing it where necessary
 
-            GameMessage[] localPlayerEntityCreateMessages = PacketHelper.LoadMessagesFromPacketFile("LocalPlayerEntityCreateMessages.bin");
+            // Player entity
+            EntityCreateBaseData playerBaseData = new(PlayerMessage.BaseData.ToByteArray());
+            Player player = new(PlayerMessage.ArchiveData.ToByteArray());
+
+            // edit player data here
+
+            foreach (Property property in player.PropertyCollection.List)
+            {
+                switch (property.Enum)
+                {
+                    // Unlock starter avatars
+                    case PropertyEnum.AvatarUnlock:
+                        if ((AvatarUnlockType)property.Value.Get() == AvatarUnlockType.Starter) property.Value.Set((int)AvatarUnlockType.Type3);
+                        break;
+
+                    // Configure avatar library
+                    case PropertyEnum.AvatarLibraryLevel:
+                        property.Value.Set(60);     // Set all avatar levels to 60
+                        break;
+                    case PropertyEnum.AvatarLibraryCostume:
+                        property.Value.Set(0ul);    // Reset the costume to default
+                        break;
+                    case PropertyEnum.AvatarLibraryTeamUp:
+                        property.Value.Set(0ul);    // Clean up team ups
+                        break;
+                }
+            }
+           
+            CommunityMember friend = player.Community.CommunityMemberList[0];
+            friend.MemberName = "DavidBrevik"; 
+            friend.Slots = new AvatarSlotInfo[] { new(15769648016960461069, 4881398219179434365, 60, 6) };
+            friend.OnlineStatus = CommunityMemberOnlineStatus.Online;
+            friend.RegionRef = 10434222419069901867;
+            friend = player.Community.CommunityMemberList[1];
+            friend.OnlineStatus = CommunityMemberOnlineStatus.Online;
+            friend.MemberName = "TonyStark";
+            friend.Slots = new AvatarSlotInfo[] { new(421791326977791218, 7150542631074405762, 60, 5) };
+            friend.RegionRef = (ulong)RegionPrototype.NPEAvengersTowerHUBRegion;
+
+            player.Community.CommunityMemberList.Add(new("Doomsaw", 1, 0, 0, new AvatarSlotInfo[] { new(17750839636937086083, 14098108758769669917, 60, 6) }, CommunityMemberOnlineStatus.Online, "", new int[] { 0 }));
+            player.Community.CommunityMemberList.Add(new("PizzaTime", 2, 0, 0, new AvatarSlotInfo[] { new(9378552423541970369, 6454902525769881598, 60, 5) }, CommunityMemberOnlineStatus.Online, "", new int[] { 0 }));
+            player.Community.CommunityMemberList.Add(new("RogueServerEnjoyer", 3, 0, 0, new AvatarSlotInfo[] { new(1660250039076459846, 9447440487974639491, 60, 3) }, CommunityMemberOnlineStatus.Online, "", new int[] { 0 }));
+            player.Community.CommunityMemberList.Add(new("WhiteQueenXOXO", 4, 0, 0, new AvatarSlotInfo[] { new(412966192105395660, 12724924652099869123, 60, 4) }, CommunityMemberOnlineStatus.Online, "", new int[] { 0 }));
+            player.Community.CommunityMemberList.Add(new("AlexBond", 5, 0, 0, new AvatarSlotInfo[] { new(9255468350667101753, 16813567318560086134, 60, 2) }, CommunityMemberOnlineStatus.Online, "", new int[] { 0 }));
+            player.Community.CommunityMemberList.Add(new("Crypto137", 6, 0, 0, new AvatarSlotInfo[] { new(421791326977791218, 1195778722002966150, 60, 2) }, CommunityMemberOnlineStatus.Online, "", new int[] { 0 }));
+            player.Community.CommunityMemberList.Add(new("yn01", 7, 0, 0, new AvatarSlotInfo[] { new(12534955053251630387, 14506515434462517197, 60, 2) }, CommunityMemberOnlineStatus.Online, "", new int[] { 0 }));
+            player.Community.CommunityMemberList.Add(new("Gazillion", 8, 0, 0, Array.Empty<AvatarSlotInfo>(), CommunityMemberOnlineStatus.Offline, "", new int[] { 0 }));
+            player.Community.CommunityMemberList.Add(new("FriendlyLawyer", 100, 0, 0, new AvatarSlotInfo[] { new(12394659164528645362, 2844257346122946366, 99, 1) }, CommunityMemberOnlineStatus.Online, "", new int[] { 2 }));
+
+            messageList.Add(new(NetMessageEntityCreate.CreateBuilder()
+                .SetBaseData(ByteString.CopyFrom(playerBaseData.Encode()))
+                .SetArchiveData(ByteString.CopyFrom(player.Encode()))
+                .Build()));
+
+            // Avatars
             uint replacementInventorySlot = 100;   // 100 here because no hero occupies slot 100, this to check that we have successfully swapped heroes
 
-            foreach (GameMessage message in localPlayerEntityCreateMessages)
+            foreach (NetMessageEntityCreate entityCreateMessage in AvatarMessages)
             {
-                var entityCreateMessage = NetMessageEntityCreate.ParseFrom(message.Payload);
                 EntityCreateBaseData baseData = new(entityCreateMessage.BaseData.ToByteArray());
+                Avatar avatar = new(entityCreateMessage.ArchiveData.ToByteArray());
 
-                if (baseData.EntityId == 14646212)      // Player entity
+                // Modify base data
+                if (playerData.Avatar != HardcodedAvatarEntity.BlackCat)
                 {
-                    Player player = new(entityCreateMessage.ArchiveData.ToByteArray());
+                    if (baseData.EntityId == (ulong)playerData.Avatar)
+                    {
+                        replacementInventorySlot = baseData.InvLoc.Slot;
+                        baseData.InvLoc.InventoryPrototypeId = GameDatabase.GetPrototypeId("Entity/Inventory/PlayerInventories/PlayerAvatarInPlay.prototype");
+                        baseData.InvLoc.Slot = 0;                           // set selected avatar entity inventory slot to 0
+                    }
+                    else if (baseData.EntityId == (ulong)HardcodedAvatarEntity.BlackCat)
+                    {
+                        baseData.InvLoc.InventoryPrototypeId = GameDatabase.GetPrototypeId("Entity/Inventory/PlayerInventories/PlayerAvatarLibrary.prototype");
+                        baseData.InvLoc.Slot = replacementInventorySlot;    // set Black Cat slot to the one previously occupied by the hero who replaces her
 
-                    // edit player data here
+                        // Black Cat goes last in the hardcoded messages, so this should always be assigned last
+                        if (replacementInventorySlot == 100) Logger.Warn("replacementInventorySlot is 100! Check the hardcoded avatar entity data");
+                    }
+                }
 
-                    foreach (Property property in player.PropertyCollection.List)
+                if (baseData.EntityId == (ulong)playerData.Avatar)
+                {
+                    // modify avatar data here
+
+                    avatar.PlayerName.Text = playerData.PlayerName;
+
+                    bool hasCostumeCurrent = false;
+                    bool hasCharacterLevel = false;
+                    bool hasCombatLevel = false;
+
+                    foreach (Property property in avatar.PropertyCollection.List)
                     {
                         switch (property.Enum)
                         {
-                            // Unlock starter avatars
-                            case PropertyEnum.AvatarUnlock:
-                                if ((AvatarUnlockType)property.Value.Get() == AvatarUnlockType.Starter) property.Value.Set((int)AvatarUnlockType.Type3);
+                            case PropertyEnum.CostumeCurrent:
+                                try
+                                {
+                                    property.Value.Set(playerData.CostumeOverride);
+                                }
+                                catch
+                                {
+                                    Logger.Warn($"Failed to get costume prototype enum for id {ConfigManager.PlayerData.CostumeOverride}");
+                                    property.Value.Set(0ul);
+                                }
+                                hasCostumeCurrent = true;
                                 break;
-
-                            // Configure avatar library
-                            case PropertyEnum.AvatarLibraryLevel:
-                                property.Value.Set(60);     // Set all avatar levels to 60
+                            case PropertyEnum.CharacterLevel:
+                                property.Value.Set(60);
+                                hasCharacterLevel = true;
                                 break;
-                            case PropertyEnum.AvatarLibraryCostume:
-                                property.Value.Set(0ul);    // Reset the costume to default
-                                break;
-                            case PropertyEnum.AvatarLibraryTeamUp:
-                                property.Value.Set(0ul);    // Clean up team ups
+                            case PropertyEnum.CombatLevel:
+                                property.Value.Set(60);
+                                hasCombatLevel = true;
                                 break;
                         }
                     }
 
-                    var customEntityCreateMessage = NetMessageEntityCreate.CreateBuilder()
-                        .SetBaseData(ByteString.CopyFrom(baseData.Encode()))
-                        .SetArchiveData(ByteString.CopyFrom(player.Encode()))
-                        .Build();
-
-                    messageList.Add(new(customEntityCreateMessage));
+                    // Create properties if not found
+                    if (hasCostumeCurrent == false) avatar.PropertyCollection.List.Add(new(PropertyEnum.CostumeCurrent, playerData.CostumeOverride));
+                    if (hasCharacterLevel == false) avatar.PropertyCollection.List.Add(new(PropertyEnum.CharacterLevel, 60));
+                    if (hasCombatLevel == false) avatar.PropertyCollection.List.Add(new(PropertyEnum.CombatLevel, 60));
                 }
-                else
-                {
-                    Avatar avatar = new(entityCreateMessage.ArchiveData.ToByteArray());
 
-                    // modify base data
-                    if (playerData.Avatar != HardcodedAvatarEntity.BlackCat)
-                    {
-                        if (baseData.EntityId == (ulong)playerData.Avatar)
-                        {
-                            replacementInventorySlot = baseData.InvLoc.Slot;
-                            baseData.InvLoc.InventoryPrototypeId = GameDatabase.GetPrototypeId("Entity/Inventory/PlayerInventories/PlayerAvatarInPlay.prototype");
-                            baseData.InvLoc.Slot = 0;                           // set selected avatar entity inventory slot to 0
-                        }
-                        else if (baseData.EntityId == (ulong)HardcodedAvatarEntity.BlackCat)
-                        {
-                            baseData.InvLoc.InventoryPrototypeId = GameDatabase.GetPrototypeId("Entity/Inventory/PlayerInventories/PlayerAvatarLibrary.prototype");
-                            baseData.InvLoc.Slot = replacementInventorySlot;    // set Black Cat slot to the one previously occupied by the hero who replaces her
-
-                            // Black Cat goes last in the hardcoded messages, so this should always be assigned last
-                            if (replacementInventorySlot == 100) Logger.Warn("replacementInventorySlot is 100! Check the hardcoded avatar entity data");
-                        }
-                    }
-
-                    if (baseData.EntityId == (ulong)playerData.Avatar)
-                    {
-                        // modify avatar data here
-
-                        avatar.PlayerName.Text = playerData.PlayerName;
-
-                        bool hasCostumeCurrent = false;
-                        bool hasCharacterLevel = false;
-                        bool hasCombatLevel = false;
-
-                        foreach (Property property in avatar.PropertyCollection.List)
-                        {
-                            switch (property.Enum)
-                            {
-                                case PropertyEnum.CostumeCurrent:
-                                    try
-                                    {
-                                        property.Value.Set(playerData.CostumeOverride);
-                                    }
-                                    catch
-                                    {
-                                        Logger.Warn($"Failed to get costume prototype enum for id {ConfigManager.PlayerData.CostumeOverride}");
-                                        property.Value.Set(0ul);
-                                    }
-                                    hasCostumeCurrent = true;
-                                    break;
-                                case PropertyEnum.CharacterLevel:
-                                    property.Value.Set(60);
-                                    hasCharacterLevel = true;
-                                    break;
-                                case PropertyEnum.CombatLevel:
-                                    property.Value.Set(60);
-                                    hasCombatLevel = true;
-                                    break;
-                            }
-                        }
-
-                        // Create properties if not found
-                        if (hasCostumeCurrent == false) avatar.PropertyCollection.List.Add(new(PropertyEnum.CostumeCurrent, playerData.CostumeOverride));
-                        if (hasCharacterLevel == false) avatar.PropertyCollection.List.Add(new(PropertyEnum.CharacterLevel, 60));
-                        if (hasCombatLevel == false) avatar.PropertyCollection.List.Add(new(PropertyEnum.CombatLevel, 60));
-                    }
-
-                    var customEntityCreateMessage = NetMessageEntityCreate.CreateBuilder()
-                        .SetBaseData(ByteString.CopyFrom(baseData.Encode()))
-                        .SetArchiveData(ByteString.CopyFrom(avatar.Encode()))
-                        .Build();
-
-                    messageList.Add(new(customEntityCreateMessage));
-                }
+                messageList.Add(new(NetMessageEntityCreate.CreateBuilder()
+                    .SetBaseData(ByteString.CopyFrom(baseData.Encode()))
+                    .SetArchiveData(ByteString.CopyFrom(avatar.Encode()))
+                    .Build()));
             }
 
             return messageList.ToArray();
